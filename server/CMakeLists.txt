@@ -10,6 +10,8 @@ find_package(spdlog REQUIRED)
 
 add_executable(nebula_server
     src/main.cpp
+    src/net/EpollPoller.cpp
+    src/net/EventLoop.cpp
 )
 
 target_include_directories(nebula_server
