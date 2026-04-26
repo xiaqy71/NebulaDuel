@@ -3,9 +3,9 @@
 #include <cstdint>
 
 void EventLoop::add(int fd, uint32_t events, EventCallback callback) {
-    callbacks_[fd] = std::move(callback);
 
     poller_.add(fd, events);
+    callbacks_[fd] = std::move(callback);
 }
 
 void EventLoop::remove(int fd) {
