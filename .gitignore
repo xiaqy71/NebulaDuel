@@ -43,3 +43,32 @@ core.*
 ### OS files ###
 .DS_Store
 Thumbs.db
+# Godot 4
+.import/
+.godot/
+
+# 导出文件
+export/
+export_presets.cfg
+
+# 临时文件
+*.tmp
+*.import
+
+# 日志
+*.log
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# 构建/缓存
+build/
+
+# 可执行导出
+*.exe
+*.zip
+*.pck
