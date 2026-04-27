@@ -11,6 +11,7 @@ public:
     using EventCallback = std::function<void(uint32_t)>;
 
     void add(int fd, uint32_t events, EventCallback callback);
+    void modify(int fd, uint32_t events);
     void remove(int fd);
     void run();
     void stop();
