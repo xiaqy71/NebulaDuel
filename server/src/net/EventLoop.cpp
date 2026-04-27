@@ -9,8 +9,16 @@ void EventLoop::add(int fd, uint32_t events, EventCallback callback) {
 }
 
 void EventLoop::remove(int fd) {
+    auto iter = callbacks_.find(fd);
+    if (iter == callbacks_.end()) {
+        return;
+    }
     poller_.remove(fd);
     callbacks_.erase(fd);
+}
+
+void EventLoop::modify(int fd, uint32_t events) {
+    poller_.modify(fd, events);
 }
 
 void EventLoop::run() {

@@ -12,11 +12,14 @@ add_executable(nebula_server
     src/main.cpp
     src/net/EpollPoller.cpp
     src/net/EventLoop.cpp
+    src/net/TcpServer.cpp
+    src/net/TcpConnection.cpp
+    src/net/Buffer.cpp
 )
 
 target_include_directories(nebula_server
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_link_libraries(nebula_server
