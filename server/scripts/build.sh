@@ -10,7 +10,6 @@ cmake -S "${PROJECT_DIR}" \
 	-G Ninja \
 	-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-cmake --build "${BUILD_DIR}" --target nebula_server
+cmake --build "${BUILD_DIR}"
 
 ln -sf build/compile_commands.json "${PROJECT_DIR}/compile_commands.json"
-

@@ -1,2196 +1,1293 @@
-# Nebula Duel 工业级开发文档
+# Nebula Duel 服务端开发计划
 
-## 1. 项目目标
+## 1. 项目定位
 
-### 项目定位
+Nebula Duel 是一个 C++20 游戏服务端学习项目，用于系统性提升网络编程、协议设计、后端状态管理、自动化测试和工程化组织能力。
 
-Nebula Duel 是一个 2D 房间制 1v1 回合对战游戏。
-
-完整玩家流程：
+项目重点是实现一套可测试、可解释、可逐步扩展的游戏服务端核心链路：
 
 ```text
-启动客户端
--> 登录 / 注册
--> 进入大厅
--> 点击匹配
--> 匹配成功
--> 进入房间
--> 双方选择技能
--> 服务器结算回合
--> 客户端播放表现
--> 战斗结束
--> 结算胜负
--> 更新排行榜
+TCP 连接
+-> 自定义二进制包头
+-> Protobuf 消息
+-> MessageDispatcher
+-> 登录 / 会话 / 匹配 / 房间 / 战斗 / 排行榜
+-> Redis / 数据库 / Lua 脚本
+-> 单元测试与集成测试
 ```
 
-### 技术目标
+外部请求通过 Python 测试脚本、单元测试和后续集成测试模拟，使开发重心集中在服务端网络、协议、状态和业务模块上。
 
-服务端必须体现游戏服务器核心能力：
+## 2. 技术目标
 
-- C++20 工程化项目
+服务端需要体现以下能力：
+
+- C++20 工程化组织
 - Linux epoll / Reactor 网络模型
-- Protobuf 协议
-- Lua 5.4 / sol2 脚本系统
-- Redis 缓存、匹配队列与排行榜
-- SQLite 或 MySQL 持久化
+- 非阻塞 TCP 连接管理
+- 输入输出缓冲区
+- length + msg_id + seq_id 自定义二进制协议
+- TCP 粘包、半包处理
+- Protobuf 消息序列化与反序列化
+- MessageDispatcher 消息分发
 - spdlog 日志
 - GoogleTest 单元测试
-- Bash 自动化构建、启动、测试
-- Git 管理代码和 Lua 脚本版本
+- Python 协议集成测试脚本
+- 后续接入 Redis、SQLite/MySQL、Lua 脚本
 
-客户端必须体现完整游戏流程：
+## 3. 开发原则
 
-- Godot 4
-- 2D UI
-- 登录界面
-- 大厅界面
-- 匹配界面
-- 战斗界面
-- 排行榜界面
-- TCP 或 WebSocket 通信
-- Protobuf 或 JSON 协议解析
+当前阶段聚焦服务端核心能力：
 
-### 最终目标
+- 网络层先保证连接管理、拆包、回包稳定
+- 协议层先保证消息 ID、seq_id、Protobuf 编解码清晰
+- 业务层按登录、Session、匹配、房间、战斗逐步推进
+- 每个阶段都配套可运行测试
+- 公开文档只描述已完成能力和明确规划，避免夸大项目状态
 
-完成一个可以演示的全栈游戏 Demo：
+测试脚本作为模拟客户端使用，用于稳定复现协议交互、异常输入和并发场景。
 
-- 两个客户端可以登录
-- 可以匹配到彼此
-- 可以进入同一个房间
-- 可以选择技能
-- 服务端权威结算
-- 客户端显示 HP、能量、回合、技能结果
-- 战斗结束写数据库
-- 排行榜写 Redis
-- 可以查看排行榜
-
-## 2. 游戏玩法设计
-
-### 2.1 基础规则
-
-游戏类型：
-
-```text
-1v1 回合制对战
-```
-
-每名玩家拥有：
-
-| 属性 | 说明 |
-|---|---|
-| HP | 生命值，归零失败 |
-| ATK | 基础攻击 |
-| DEF | 基础防御 |
-| Energy | 能量，用于释放技能 |
-| MaxEnergy | 最大能量 |
-| WinCount | 胜场 |
-| RankScore | 排行榜积分 |
-
-初始属性建议：
-
-```text
-HP: 100
-ATK: 10
-DEF: 5
-Energy: 3
-MaxEnergy: 10
-```
-
-每回合流程：
-
-```text
-1. 服务器广播回合开始
-2. 双方客户端选择技能
-3. 客户端发送技能选择
-4. 服务器等待双方输入或超时
-5. 服务器调用 Lua 计算技能效果
-6. 服务器更新战斗状态
-7. 服务器广播回合结果
-8. 客户端播放表现
-9. 判断是否结束
-```
-
-回合选择时间：
-
-```text
-15 秒
-```
-
-如果玩家超时：
-
-```text
-默认使用普通攻击
-```
-
-### 2.2 技能设计
-
-第一版只做 4 个技能，保证可玩。
-
-| 技能 ID | 名称 | 消耗能量 | 效果 |
-|---|---|---:|---|
-| 1001 | 普通攻击 | 0 | 造成 ATK - DEF 修正伤害 |
-| 1002 | 重击 | 2 | 造成较高伤害 |
-| 1003 | 防御姿态 | 1 | 本回合减伤 |
-| 1004 | 能量聚焦 | 0 | 恢复能量 |
-
-客户端表现必须包含：
-
-- HP 条变化
-- 能量变化
-- 技能文字提示
-- 伤害数字
-- 回合结果日志
-- 胜负结算弹窗
-
-## 3. 服务端架构
-
-### 3.1 总体架构
-
-```text
-Client Godot
-    |
- TCP/WebSocket
-    |
-Gateway / Net Layer
-    |
-SessionManager
-    |
-MessageDispatcher
-    |
-+-------------------------+
-| Login / Lobby / Match   |
-| Room / Battle / Rank    |
-+-------------------------+
-    |
-+-------------------------+
-| Redis / DB / Lua / Log  |
-+-------------------------+
-```
-
-### 服务端核心原则
-
-- 客户端只提交输入
-- 服务端维护真实状态
-- 所有战斗结果由服务端计算
-- 客户端不可直接修改 HP、胜负、排名
-- 关键逻辑可测试
-- 战斗状态可序列化、可日志追踪
-
-### 3.2 推荐目录结构
+## 4. 当前目录结构
 
 ```text
 NebulaDuel/
+  CMakeLists.txt
+  README.md
+  docs/
+    nebula_duel_development_plan.md
   server/
     CMakeLists.txt
-    cmake/
+    include/
+      net/
+        Buffer.h
+        EpollPoller.h
+        EventLoop.h
+        TcpConnection.h
+        TcpServer.h
+      protocol/
+        MessageDispatcher.h
+        MessageId.h
+        PacketCodec.h
+    src/
+      main.cpp
+      net/
+        Buffer.cpp
+        EpollPoller.cpp
+        EventLoop.cpp
+        TcpConnection.cpp
+        TcpServer.cpp
+      protocol/
+        MessageDispatcher.cpp
+        PacketCodec.cpp
     proto/
       common.proto
       login.proto
-      lobby.proto
-      match.proto
-      battle.proto
-      rank.proto
+    generated/
+      common.pb.h
+      common.pb.cc
+      login.pb.h
+      login.pb.cc
     scripts/
       build.sh
       run_server.sh
-      run_tests.sh
       gen_proto.sh
-      start_redis.sh
-      init_db.sh
-    config/
-      server.yaml
-      db.sql
-      redis.conf
-    lua/
-      skills/
-        skill_1001.lua
-        skill_1002.lua
-        skill_1003.lua
-        skill_1004.lua
-      battle/
-        battle_rules.lua
-    src/
-      main.cpp
-      core/
-        Application.h
-        Application.cpp
-      net/
-        EpollPoller.h
-        EventLoop.h
-        TcpServer.h
-        TcpConnection.h
-        Buffer.h
-      protocol/
-        Packet.h
-        PacketCodec.h
-        MessageDispatcher.h
-      session/
-        Session.h
-        SessionManager.h
-      login/
-        LoginService.h
-      lobby/
-        LobbyService.h
-      match/
-        MatchService.h
-      room/
-        Room.h
-        RoomManager.h
-      battle/
-        BattleService.h
-        BattleRoom.h
-        BattleContext.h
-      script/
-        ScriptEngine.h
-        ScriptVersionManager.h
-      cache/
-        CacheManager.h
-        RedisClient.h
-      db/
-        DbManager.h
-        PlayerDao.h
-        BattleRecordDao.h
-      timer/
-        TimerManager.h
-      logger/
-        Logger.h
-      admin/
-        AdminService.h
+      test_packet_client.py
     tests/
-      test_packet_codec.cpp
-      test_battle.cpp
-      test_match.cpp
-      test_lua_skill.cpp
-  client/
-    NebulaDuelGodot/
-      project.godot
-      scenes/
-        LoginScene.tscn
-        LobbyScene.tscn
-        MatchScene.tscn
-        BattleScene.tscn
-        RankScene.tscn
-      scripts/
-        NetworkClient.gd
-        MessageDispatcher.gd
-        UIManager.gd
-        LoginScene.gd
-        LobbyScene.gd
-        MatchScene.gd
-        BattleScene.gd
-        RankScene.gd
-        BattleView.gd
-      assets/
-        ui/
-        effects/
-  docs/
-    architecture.md
-    protocol.md
-    db.md
-    redis.md
-    lua_skill.md
+      PacketCodecTest.cpp
 ```
 
-### 3.3 服务端模块设计
+## 5. 已完成能力
 
-#### Net 网络层
+截至 Day 5：
 
-职责：
+- CMake + Ninja 构建
+- spdlog 启动日志
+- epoll poller
+- EventLoop 事件分发
+- TcpServer accept 多连接
+- TcpConnection 非阻塞读写
+- Buffer 输入输出缓冲
+- PacketCodec 编解码
+- 支持 length + msg_id + seq_id 包头
+- 支持粘包、半包处理
+- PacketCodec GoogleTest
+- common/login Protobuf
+- gen_proto.sh
+- MessageId
+- MessageDispatcher
+- LoginRequest -> LoginResponse 假数据链路
+- Python 协议测试脚本
 
-- epoll 事件循环
-- 监听客户端连接
-- 处理 TCP 读写
-- 管理连接生命周期
-- 提供消息回调给 Protocol 层
+## 6. 协议设计
 
-核心类：
-
-```cpp
-EventLoop
-EpollPoller
-TcpServer
-TcpConnection
-Buffer
-```
-
-第一版建议：
-
-- 单线程 Reactor
-- 后续可扩展为主从 Reactor
-- 每个连接维护输入/输出缓冲区
-- 粘包拆包交给 PacketCodec
-
-#### Protocol 协议层
-
-职责：
-
-- 处理包头
-- Protobuf 编解码
-- 消息 ID 分发
-- 请求与响应对应
-
-包结构建议：
+当前 TCP 包格式：
 
 ```text
-uint32 packet_len
-uint16 msg_id
+uint32 length   // msg_id + seq_id + payload 的总长度，不包含 length 自身
+uint32 msg_id
 uint32 seq_id
-bytes protobuf_body
+bytes  payload  // Protobuf 序列化结果
 ```
 
-| 字段 | 说明 |
-|---|---|
-| packet_len | 整包长度，不含自身或含自身需统一 |
-| msg_id | 协议号 |
-| seq_id | 请求序号 |
-| protobuf_body | Protobuf 序列化内容 |
+当前消息号：
 
-#### Session 会话层
+```text
+1001 LoginRequest
+1002 LoginResponse
+```
 
-职责：
+当前 Protobuf：
 
-- 绑定连接和玩家
-- 记录登录状态
-- 管理 token
-- 断线处理
-- 防重复登录
+```text
+common.proto
+login.proto
+```
 
-Session 状态：
+## 7. 测试策略
+
+单元测试：
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+当前覆盖：
+
+- encode 后 decode
+- 半包返回 NeedMore 且不消费 Buffer
+- 粘包逐个解析
+- 非法 length 返回 Error
+- 空 payload 合法
+
+集成测试：
+
+```bash
+python3 server/scripts/test_packet_client.py
+```
+
+当前覆盖：
+
+- LoginRequest / LoginResponse Protobuf 链路
+- 粘包登录请求
+- 半包登录请求
+- 非法包关闭连接
+
+## 8. 每日开发计划
+
+每天都按同一个节奏推进：
+
+```text
+1. 先补协议或接口定义
+2. 再实现服务端模块
+3. 最后补单元测试或 Python 集成测试
+4. 保证 build + ctest 通过
+```
+
+每日基础检查：
+
+```bash
+./server/scripts/build.sh
+ctest --test-dir build --output-on-failure
+python3 -m py_compile server/scripts/test_packet_client.py
+```
+
+### Day 1：工程初始化
+
+任务：
+
+- 创建仓库基础结构
+- 建立 `server/`、`docs/` 目录
+- 配置顶层 `CMakeLists.txt`
+- 配置 `server/CMakeLists.txt`
+- 引入 C++20 编译选项
+- 引入 spdlog
+- 编写 `server/src/main.cpp`
+- 编写 `server/scripts/build.sh`
+- 编写 `server/scripts/run_server.sh`
+
+产出文件：
+
+- `CMakeLists.txt`
+- `server/CMakeLists.txt`
+- `server/src/main.cpp`
+- `server/scripts/build.sh`
+- `server/scripts/run_server.sh`
+
+验收标准：
+
+- `./server/scripts/build.sh` 可以编译
+- `./build/server/nebula_server` 可以启动
+- 服务端启动时打印日志
+
+### Day 2：EpollPoller 与 EventLoop
+
+任务：
+
+- 实现 `EpollPoller`
+- 封装 `epoll_create1`
+- 封装 `epoll_ctl ADD/MOD/DEL`
+- 封装 `epoll_wait`
+- 实现 `EventLoop`
+- 支持 fd 注册、修改、删除
+- 支持事件回调分发
+- 支持 `run()` 和 `stop()`
+
+产出文件：
+
+- `server/include/net/EpollPoller.h`
+- `server/src/net/EpollPoller.cpp`
+- `server/include/net/EventLoop.h`
+- `server/src/net/EventLoop.cpp`
+
+测试方式：
+
+- 写一个临时 pipe 或 socket fd 注册到 EventLoop
+- 手动触发可读事件
+- 确认回调被执行
+
+验收标准：
+
+- epoll fd 正常创建和释放
+- fd 可以注册、修改、删除
+- EventLoop 能持续轮询事件
+- 空事件不会导致崩溃
+
+### Day 3：TcpServer、TcpConnection 与 Buffer
+
+任务：
+
+- 实现 `TcpServer`
+- 创建监听 socket
+- 设置非阻塞
+- 设置 `SO_REUSEADDR`
+- 实现 `accept4`
+- 实现 `TcpConnection`
+- 支持非阻塞 read/write
+- 实现连接关闭逻辑
+- 实现 `Buffer`
+- 支持 append、retrieve、peek
+- 支持输入缓冲和输出缓冲
+
+产出文件：
+
+- `server/include/net/TcpServer.h`
+- `server/src/net/TcpServer.cpp`
+- `server/include/net/TcpConnection.h`
+- `server/src/net/TcpConnection.cpp`
+- `server/include/net/Buffer.h`
+- `server/src/net/Buffer.cpp`
+
+测试方式：
+
+- 用 `nc 127.0.0.1 9000` 连接服务端
+- 多开几个连接
+- 发送普通字符串
+- 主动断开连接
+
+验收标准：
+
+- 多连接可以同时接入
+- 客户端断开不崩溃
+- 服务端可以回显或记录收到的数据
+- 输出缓冲区可以处理短写
+
+### Day 4：PacketCodec 与 TCP 拆包
+
+任务：
+
+- 设计包头格式
+- 实现 `Packet` 结构
+- 实现 `PacketCodec::encode`
+- 实现 `PacketCodec::decode`
+- 支持 `length + msg_id + seq_id + payload`
+- 处理半包
+- 处理粘包
+- 处理非法长度
+- 将 `TcpConnection::handleRead` 从原始 echo 改为按包解析
+- 增加 PacketCodec 单元测试
+
+产出文件：
+
+- `server/include/protocol/PacketCodec.h`
+- `server/src/protocol/PacketCodec.cpp`
+- `server/tests/PacketCodecTest.cpp`
+
+测试方式：
+
+- `ctest --test-dir build --output-on-failure`
+- Python 脚本发送完整包、粘包、半包、非法包
+
+验收标准：
+
+- 单包可以正确解析
+- 半包返回 NeedMore 且不消费 Buffer
+- 粘包可以连续解析多个 Packet
+- 非法 length 会关闭连接
+- 单元测试通过
+
+### Day 5：Protobuf 与 MessageDispatcher
+
+任务：
+
+- 编写 `common.proto`
+- 编写 `login.proto`
+- 编写 `gen_proto.sh`
+- 生成 C++ Protobuf 文件
+- CMake 接入 Protobuf
+- 定义 `MessageId`
+- 实现 `MessageDispatcher`
+- `TcpConnection` 解析 Packet 后调用 dispatcher
+- 注册 `LoginRequest` handler
+- 返回 `LoginResponse` 假数据
+- Python 脚本发送 Protobuf 登录请求
+
+产出文件：
+
+- `server/proto/common.proto`
+- `server/proto/login.proto`
+- `server/generated/*.pb.h`
+- `server/generated/*.pb.cc`
+- `server/include/protocol/MessageId.h`
+- `server/include/protocol/MessageDispatcher.h`
+- `server/src/protocol/MessageDispatcher.cpp`
+- `server/scripts/test_packet_client.py`
+
+测试方式：
+
+- `ctest --test-dir build --output-on-failure`
+- 启动服务端后运行 `python3 server/scripts/test_packet_client.py`
+
+验收标准：
+
+- Protobuf 文件可以生成
+- 服务端能解析 `LoginRequest`
+- 服务端能返回 `LoginResponse`
+- Python 脚本测试登录、粘包、半包、非法包通过
+
+### Day 6：LoginService 模块化
+
+任务：
+
+- 新增 `LoginService`
+- 将登录处理逻辑从 `TcpServer` 构造函数移出
+- 定义 `LoginResult`
+- 定义登录错误码映射
+- 增加用户名、密码基础校验
+- 空用户名返回错误
+- 空密码返回错误
+- 合法输入返回测试用户信息
+- 为 LoginService 写单元测试
+
+建议目录：
+
+```text
+server/include/login/LoginService.h
+server/src/login/LoginService.cpp
+server/tests/LoginServiceTest.cpp
+```
+
+实现重点：
+
+- `TcpServer` 只负责注册 handler
+- handler 只负责 Protobuf parse/serialize
+- 业务判断放进 `LoginService`
+
+测试方式：
+
+- GoogleTest 直接测试 `LoginService::login`
+- Python 脚本测试正常登录和空字段登录
+
+验收标准：
+
+- 登录业务不再写在 `TcpServer` 构造函数里
+- `LoginServiceTest` 覆盖正常输入、空用户名、空密码
+- Python 登录测试通过
+
+### Day 7：SQLite 基础接入
+
+任务：
+
+- 引入 SQLite 依赖
+- 新增 `DbManager`
+- 新增数据库初始化脚本
+- 创建 `players` 表
+- 创建测试玩家数据
+- 新增 `PlayerDao`
+- 支持按 username 查询玩家
+- 支持插入玩家
+
+建议目录：
+
+```text
+server/include/db/DbManager.h
+server/src/db/DbManager.cpp
+server/include/db/PlayerDao.h
+server/src/db/PlayerDao.cpp
+server/config/schema.sql
+server/scripts/init_db.sh
+```
+
+建议表结构：
+
+```sql
+CREATE TABLE IF NOT EXISTS players (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    rank_score INTEGER NOT NULL DEFAULT 1000,
+    win_count INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL
+);
+```
+
+测试方式：
+
+- 单元测试使用临时 SQLite db
+- 测试插入玩家
+- 测试查询存在玩家
+- 测试查询不存在玩家
+
+验收标准：
+
+- 数据库可以初始化
+- `PlayerDao` 能查询玩家
+- `LoginService` 可以从数据库读取测试玩家
+
+### Day 8：密码处理与登录校验
+
+任务：
+
+- 增加密码 hash 工具类
+- 选择一个简单可解释的 hash 方案用于学习阶段
+- 登录时比对密码 hash
+- 完善 `LoginResponse` 错误码
+- 增加登录失败日志
+- Python 脚本增加正确密码和错误密码测试
+
+建议目录：
+
+```text
+server/include/security/PasswordHasher.h
+server/src/security/PasswordHasher.cpp
+server/tests/PasswordHasherTest.cpp
+```
+
+实现重点：
+
+- 不在日志中打印明文密码
+- DAO 只负责数据访问
+- LoginService 负责认证流程
+
+验收标准：
+
+- 正确账号密码登录成功
+- 错误密码返回明确错误
+- 不存在账号返回明确错误
+- 单元测试和 Python 集成测试通过
+
+### Day 9：Session 基础结构
+
+任务：
+
+- 定义 `Session`
+- 定义 `SessionState`
+- 实现 `SessionManager`
+- 支持 connection fd 到 session 的映射
+- 登录成功后绑定 player_id
+- 连接关闭时清理 session
+- 增加在线数量查询
+- 增加 SessionManager 单元测试
+
+建议目录：
+
+```text
+server/include/session/Session.h
+server/include/session/SessionManager.h
+server/src/session/SessionManager.cpp
+server/tests/SessionManagerTest.cpp
+```
+
+状态建议：
 
 ```cpp
 enum class SessionState {
     Connected,
     Authed,
-    InLobby,
-    Matching,
-    InRoom,
     Disconnected
 };
 ```
 
-#### Login 登录系统
+验收标准：
 
-职责：
+- 新连接可以创建 session
+- 登录成功后 session 绑定 player_id
+- 断开连接后 session 被清理
+- 未登录连接不能进入后续业务 handler
 
-- 注册账号
-- 登录校验
-- 生成 token
-- Redis 保存 session
-- MySQL/SQLite 写登录日志
+### Day 10：登录链路收尾
 
-登录成功后：
+任务：
 
-```text
-1. 校验账号密码
-2. 生成 token
-3. Redis 写入 token
-4. Redis 写在线状态
-5. 创建 Session
-6. 返回玩家基础数据
-```
+- 整合 `LoginService`
+- 整合 `PlayerDao`
+- 整合 `SessionManager`
+- 登录成功后写 session
+- 登录失败返回错误码
+- 增加登录日志表或日志文件
+- 整理登录相关 proto 字段
+- 扩展 Python 登录测试
 
-#### Lobby 大厅系统
-
-职责：
-
-- 玩家进入大厅
-- 获取基础信息
-- 获取排行榜摘要
-- 处理进入匹配
-
-#### Match 匹配系统
-
-职责：
-
-- 玩家加入匹配队列
-- 取消匹配
-- 匹配成功创建房间
-
-第一版匹配规则：
+建议增加：
 
 ```text
-队列中有两个玩家即可匹配成功
+Login success
+Login invalid username
+Login invalid password
+Login duplicated connection
 ```
 
-后续可扩展：
+验收标准：
+
+- 登录链路从 TCP 到 DB 到 Session 完整跑通
+- 所有登录错误都有响应
+- `ctest` 通过
+- Python 登录集成测试通过
+
+### Day 11：CI 接入
+
+任务：
+
+- 新增 `.github/workflows/ci.yml`
+- 使用 GitHub Actions 的 `ubuntu-24.04`
+- 安装构建依赖
+- 在 CI 中重新生成 Protobuf C++ 文件
+- 运行 CMake configure
+- 运行 build
+- 运行 ctest
+- 运行 Python 语法检查
+
+CI 步骤：
 
 ```text
-按 RankScore 范围匹配
-等待时间越长，匹配范围越大
+checkout
+apt install build-essential cmake ninja-build protobuf-compiler libprotobuf-dev libabsl-dev libspdlog-dev libgtest-dev python3
+./server/scripts/gen_proto.sh
+cmake -S . -B build -G Ninja
+cmake --build build
+ctest --test-dir build --output-on-failure
+python3 -m py_compile server/scripts/test_packet_client.py
 ```
 
-#### Room 房间系统
+验收标准：
 
-职责：
+- GitHub Actions 能自动运行
+- push 后 CI 通过
+- README 中 CI badge 可选
 
-- 创建房间
-- 管理房间玩家
-- 房间状态流转
-- 进入战斗
+### Day 12：协议错误处理统一
 
-房间状态：
+任务：
 
-```cpp
-enum class RoomState {
-    Created,
-    WaitingReady,
-    Fighting,
-    Finished,
-    Destroyed
-};
-```
+- 统一错误码定义
+- 扩展 `common.proto`
+- 定义通用 `ErrorCode`
+- LoginResponse 使用统一错误码
+- MessageDispatcher 处理未知 msg_id
+- PacketCodec 处理超大包日志
+- Python 脚本增加未知 msg_id 测试
 
-#### Battle 战斗系统
+验收标准：
 
-职责：
+- 未知 msg_id 不会导致崩溃
+- 非法 Protobuf payload 不会导致崩溃
+- 错误响应格式统一
 
-- 维护权威战斗状态
-- 接收玩家技能选择
-- 处理回合计时
-- 调用 Lua 技能逻辑
-- 广播回合结果
-- 判断胜负
-- 写战斗记录
-- 更新排行榜
+### Day 13：Heartbeat 心跳协议
 
-核心状态：
+任务：
 
-```cpp
-struct BattlePlayer {
-    uint64_t playerId;
-    int hp;
-    int atk;
-    int def;
-    int energy;
-    int maxEnergy;
-    int selectedSkillId;
-    bool hasSelected;
-};
+- 新增 `HeartbeatRequest`
+- 新增 `HeartbeatResponse`
+- 分配 msg_id
+- 注册 heartbeat handler
+- Session 记录 `last_active_time`
+- Python 脚本增加 heartbeat 测试
 
-struct BattleRoom {
-    uint64_t roomId;
-    int round;
-    BattlePlayer playerA;
-    BattlePlayer playerB;
-    BattleState state;
-};
-```
-
-#### ScriptEngine Lua 脚本系统
-
-职责：
-
-- 加载 Lua 5.4 脚本
-- 用 sol2 暴露 C++ 战斗上下文
-- 调用技能函数
-- 捕获脚本错误
-- 支持重载脚本
-
-技能脚本输入：
+建议消息号：
 
 ```text
-caster
-target
-battle_context
+1101 HeartbeatRequest
+1102 HeartbeatResponse
 ```
 
-技能脚本输出：
+验收标准：
 
-```lua
-{
-  damage = 12,
-  heal = 0,
-  energy_delta = -2,
-  shield = 0,
-  text = "Heavy Strike"
-}
-```
+- 登录前也可以心跳
+- 心跳响应 seq_id 与请求一致
+- session last_active_time 更新
 
-#### ScriptVersionManager
+### Day 14：定时器基础
 
-职责：
+任务：
 
-- 记录当前 Lua 脚本版本
-- 使用 Git commit hash 标记脚本版本
-- 战斗记录写入脚本版本
-- 支持管理命令 reload
+- 实现 `TimerManager`
+- 支持一次性定时任务
+- 支持周期性定时任务
+- EventLoop 每轮检查到期 timer
+- 用 timer 扫描超时 session
+- 增加 TimerManager 单元测试
 
-最低实现：
+建议目录：
 
 ```text
-启动时读取 lua/ 当前 git commit hash
-战斗记录 battle_records.script_version 写入 hash
+server/include/timer/TimerManager.h
+server/src/timer/TimerManager.cpp
+server/tests/TimerManagerTest.cpp
 ```
 
-#### CacheManager Redis 模块
+验收标准：
 
-职责：
+- 定时器能按时间触发
+- session 超时后可标记或清理
+- 定时器测试通过
 
-- token/session
-- 在线状态
-- 匹配队列
-- 排行榜
-- 登录锁
-- 玩家热数据
+### Day 15：Redis 基础接入
 
-建议 C++ Redis 客户端：
+任务：
+
+- 选择 Redis C++ 客户端
+- 封装 `RedisClient`
+- 支持 get/set/del
+- 支持 expire
+- 支持 list 或 zset 的基础操作
+- 编写 Redis 连接配置
+- 增加 Redis 可用性检查脚本
+
+建议目录：
 
 ```text
-redis-plus-plus
+server/include/cache/RedisClient.h
+server/src/cache/RedisClient.cpp
+server/config/server.yaml
 ```
 
-#### DbManager 数据库模块
+验收标准：
 
-个人项目建议优先用 SQLite：
+- 服务端能连接本地 Redis
+- 能写入 token 测试 key
+- 能设置过期时间
+- Redis 不可用时有清晰日志
 
-- 环境简单
-- 方便演示
-- 30-45 天更稳
+### Day 16：Token 与在线状态
 
-如果想贴近公司环境，可以 MySQL。
+任务：
 
-推荐策略：
+- 登录成功生成 token
+- Redis 保存 token
+- Redis 保存在线状态
+- Session 保存 token
+- 心跳刷新在线状态
+- 断开连接清理在线状态
+- Python 脚本验证登录返回 token
 
-```text
-开发期 SQLite
-文档中保留 MySQL 兼容设计
-```
-
-#### TimerManager 定时器模块
-
-职责：
-
-- 回合超时
-- 匹配超时
-- session 过期扫描
-- 房间销毁延迟
-
-第一版推荐：
-
-```text
-EventLoop 内部最小堆定时器
-```
-
-#### Logger 日志模块
-
-使用 spdlog。
-
-日志类型：
-
-```text
-server.log
-login.log
-battle.log
-error.log
-```
-
-关键日志：
-
-- 登录成功/失败
-- 匹配成功
-- 房间创建
-- 技能选择
-- 回合结算
-- 战斗结束
-- Redis/DB 错误
-- Lua 错误
-
-#### Admin 管理接口
-
-第一版可以做 TCP 内部命令或命令行工具。
-
-最低命令：
-
-```text
-reload_lua
-room_count
-online_count
-kick player_id
-```
-
-## 4. 客户端架构
-
-### 4.1 Godot 总体结构
-
-```text
-NetworkClient
-    |
-MessageDispatcher
-    |
-UIManager
-    |
-Scenes
-```
-
-### 客户端原则
-
-- 不计算最终伤害
-- 不决定胜负
-- 不相信本地状态
-- 所有战斗状态以服务器广播为准
-- 本地只做 UI、动画、输入、提示
-
-### 4.2 客户端模块
-
-#### NetworkClient
-
-职责：
-
-- 连接服务器
-- 发送协议
-- 接收协议
-- 断线重连提示
-- 心跳
-
-Godot 可选：
-
-```text
-StreamPeerTCP
-WebSocketPeer
-```
-
-建议第一版：
-
-```text
-TCP + JSON
-```
-
-如果想强化简历：
-
-```text
-TCP + Protobuf
-```
-
-实际建议：
-
-```text
-服务端 Protobuf 为主
-客户端可以先 JSON，后续再 Protobuf
-```
-
-#### LoginScene
-
-功能：
-
-- 输入账号
-- 输入密码
-- 注册按钮
-- 登录按钮
-- 错误提示
-- 登录成功进入 LobbyScene
-
-#### LobbyScene
-
-功能：
-
-- 显示玩家名
-- 显示胜场/积分
-- 开始匹配按钮
-- 排行榜按钮
-- 退出登录按钮
-
-#### MatchScene
-
-功能：
-
-- 显示匹配中
-- 显示等待时间
-- 取消匹配按钮
-- 匹配成功跳转战斗
-
-#### BattleScene
-
-功能：
-
-- 显示双方 HP
-- 显示双方能量
-- 显示当前回合
-- 显示技能按钮
-- 显示倒计时
-- 显示战斗日志
-- 显示结算弹窗
-
-#### RankScene
-
-功能：
-
-- 请求排行榜
-- 显示前 20 名
-- 显示自己排名
-- 返回大厅
-
-## 5. 通信协议设计
-
-### 5.1 协议号规划
-
-```text
-1000 - 1999: 系统协议
-2000 - 2999: 登录协议
-3000 - 3999: 大厅协议
-4000 - 4999: 匹配协议
-5000 - 5999: 房间协议
-6000 - 6999: 战斗协议
-7000 - 7999: 排行榜协议
-9000 - 9999: 管理协议
-```
-
-### 5.2 核心协议
-
-| MsgId | 名称 | 方向 |
-|---:|---|---|
-| 1001 | HeartbeatReq | C -> S |
-| 1002 | HeartbeatResp | S -> C |
-| 2001 | RegisterReq | C -> S |
-| 2002 | RegisterResp | S -> C |
-| 2003 | LoginReq | C -> S |
-| 2004 | LoginResp | S -> C |
-| 3001 | EnterLobbyReq | C -> S |
-| 3002 | EnterLobbyResp | S -> C |
-| 4001 | StartMatchReq | C -> S |
-| 4002 | StartMatchResp | S -> C |
-| 4003 | CancelMatchReq | C -> S |
-| 4004 | MatchSuccessNotify | S -> C |
-| 5001 | EnterRoomNotify | S -> C |
-| 6001 | BattleStartNotify | S -> C |
-| 6002 | SelectSkillReq | C -> S |
-| 6003 | SelectSkillResp | S -> C |
-| 6004 | RoundResultNotify | S -> C |
-| 6005 | BattleEndNotify | S -> C |
-| 7001 | RankListReq | C -> S |
-| 7002 | RankListResp | S -> C |
-
-## 6. Protobuf 消息设计
-
-### common.proto
-
-```proto
-syntax = "proto3";
-
-package nebula;
-
-message ErrorInfo {
-  int32 code = 1;
-  string message = 2;
-}
-
-message PlayerBrief {
-  uint64 player_id = 1;
-  string name = 2;
-  int32 rank_score = 3;
-  int32 win_count = 4;
-}
-```
-
-### login.proto
-
-```proto
-syntax = "proto3";
-
-package nebula;
-
-import "common.proto";
-
-message RegisterReq {
-  string username = 1;
-  string password = 2;
-}
-
-message RegisterResp {
-  bool success = 1;
-  ErrorInfo error = 2;
-}
-
-message LoginReq {
-  string username = 1;
-  string password = 2;
-}
-
-message LoginResp {
-  bool success = 1;
-  ErrorInfo error = 2;
-  string token = 3;
-  PlayerBrief player = 4;
-}
-```
-
-### match.proto
-
-```proto
-syntax = "proto3";
-
-package nebula;
-
-message StartMatchReq {
-}
-
-message StartMatchResp {
-  bool success = 1;
-  string message = 2;
-}
-
-message CancelMatchReq {
-}
-
-message MatchSuccessNotify {
-  uint64 room_id = 1;
-  uint64 opponent_id = 2;
-  string opponent_name = 3;
-}
-```
-
-### battle.proto
-
-```proto
-syntax = "proto3";
-
-package nebula;
-
-message BattlePlayerState {
-  uint64 player_id = 1;
-  string name = 2;
-  int32 hp = 3;
-  int32 energy = 4;
-  int32 atk = 5;
-  int32 def = 6;
-}
-
-message BattleStartNotify {
-  uint64 room_id = 1;
-  int32 round = 2;
-  BattlePlayerState self = 3;
-  BattlePlayerState opponent = 4;
-}
-
-message SelectSkillReq {
-  uint64 room_id = 1;
-  int32 skill_id = 2;
-}
-
-message SelectSkillResp {
-  bool success = 1;
-  string message = 2;
-}
-
-message SkillResult {
-  uint64 caster_id = 1;
-  uint64 target_id = 2;
-  int32 skill_id = 3;
-  int32 damage = 4;
-  int32 heal = 5;
-  int32 energy_delta = 6;
-  string text = 7;
-}
-
-message RoundResultNotify {
-  uint64 room_id = 1;
-  int32 round = 2;
-  repeated SkillResult results = 3;
-  BattlePlayerState player_a = 4;
-  BattlePlayerState player_b = 5;
-}
-
-message BattleEndNotify {
-  uint64 room_id = 1;
-  uint64 winner_id = 2;
-  uint64 loser_id = 3;
-  int32 rank_score_delta = 4;
-}
-```
-
-### rank.proto
-
-```proto
-syntax = "proto3";
-
-package nebula;
-
-import "common.proto";
-
-message RankListReq {
-  int32 offset = 1;
-  int32 limit = 2;
-}
-
-message RankListResp {
-  repeated PlayerBrief players = 1;
-  int32 self_rank = 2;
-}
-```
-
-## 7. Redis Key 设计
-
-### 7.1 登录与 Session
+Redis key 建议：
 
 ```text
 token:{token} -> player_id
-session:{player_id} -> token
-online:{player_id} -> 1
-login_lock:{username} -> 1
+online:{player_id} -> connection/session info
 ```
 
-TTL：
+验收标准：
 
-| Key | TTL |
-|---|---:|
-| token:{token} | 24h |
-| session:{player_id} | 24h |
-| online:{player_id} | 连接期间 |
-| login_lock:{username} | 5s |
+- 登录成功返回 token
+- Redis 可以查到 token
+- 断开后在线状态被清理或过期
 
-### 7.2 匹配队列
+### Day 17：防重复登录
+
+任务：
+
+- 检查 `online:{player_id}`
+- 同账号重复登录时选择策略
+- 策略一：拒绝新登录
+- 策略二：踢掉旧连接
+- 当前建议先实现拒绝新登录
+- 增加重复登录测试
+
+验收标准：
+
+- 同一账号不能产生两个有效 session
+- 重复登录返回明确错误码
+- 原连接状态保持正常
+
+### Day 18：MatchService 内存队列
+
+任务：
+
+- 新增 match proto
+- 定义 StartMatchRequest/Response
+- 定义 MatchSuccessNotify
+- 实现 `MatchService`
+- 使用内存队列匹配两个玩家
+- 登录后才允许进入匹配
+- Python 脚本模拟两个连接登录并匹配
+
+建议目录：
 
 ```text
-match:queue -> list/player_id
-match:player:{player_id} -> timestamp
+server/proto/match.proto
+server/include/match/MatchService.h
+server/src/match/MatchService.cpp
+server/tests/MatchServiceTest.cpp
 ```
 
-操作：
+验收标准：
+
+- 单个玩家进入等待队列
+- 第二个玩家进入后匹配成功
+- 两个连接都收到 MatchSuccessNotify
+
+### Day 19：取消匹配与重复匹配保护
+
+任务：
+
+- 定义 CancelMatchRequest/Response
+- MatchService 支持取消匹配
+- 防止同一 player_id 重复入队
+- 断线时从匹配队列移除
+- 增加 MatchService 单元测试
+
+验收标准：
+
+- 玩家可以取消匹配
+- 重复点击匹配不会重复入队
+- 断开连接不会残留匹配状态
+
+### Day 20：Redis 匹配队列
+
+任务：
+
+- 将内存匹配队列迁移到 Redis
+- 使用 list/set 存储匹配队列和玩家状态
+- 支持重复匹配保护
+- 支持取消匹配
+- 保留 MatchService 接口不变
+
+Key 建议：
 
 ```text
-LPUSH match:queue player_id
-RPOP match:queue
-DEL match:player:{player_id}
+match:queue
+match:player:{player_id}
 ```
 
-第一版也可以只在 C++ 内存做匹配，Redis 做展示用途。为了贴合项目要求，建议 Redis 队列参与匹配。
+验收标准：
 
-### 7.3 排行榜
+- Redis 中能看到匹配队列
+- 匹配成功后 key 被清理
+- 服务重启后不会误匹配脏数据
+
+### Day 21：RoomManager
+
+任务：
+
+- 新增 room proto
+- 定义 RoomCreatedNotify
+- 实现 `Room`
+- 实现 `RoomManager`
+- 匹配成功后创建房间
+- 房间绑定两个 player_id
+- 房间状态从 Created 进入 WaitingReady
+
+建议目录：
 
 ```text
-rank:score -> zset
+server/proto/room.proto
+server/include/room/Room.h
+server/include/room/RoomManager.h
+server/src/room/RoomManager.cpp
 ```
-
-结构：
-
-```text
-ZADD rank:score score player_id
-ZREVRANGE rank:score 0 19 WITHSCORES
-ZREVRANK rank:score player_id
-```
-
-### 7.4 玩家热数据
-
-```text
-player:hot:{player_id} -> hash
-```
-
-字段：
-
-```text
-name
-rank_score
-win_count
-last_login_time
-```
-
-## 8. 数据库表设计
-
-以 SQLite/MySQL 兼容设计为例。
-
-### players
-
-```sql
-CREATE TABLE players (
-  player_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username VARCHAR(64) NOT NULL UNIQUE,
-  password_hash VARCHAR(128) NOT NULL,
-  nickname VARCHAR(64) NOT NULL,
-  rank_score INTEGER NOT NULL DEFAULT 1000,
-  win_count INTEGER NOT NULL DEFAULT 0,
-  lose_count INTEGER NOT NULL DEFAULT 0,
-  created_at DATETIME NOT NULL,
-  updated_at DATETIME NOT NULL
-);
-```
-
-### player_profiles
-
-```sql
-CREATE TABLE player_profiles (
-  player_id INTEGER PRIMARY KEY,
-  level INTEGER NOT NULL DEFAULT 1,
-  exp INTEGER NOT NULL DEFAULT 0,
-  avatar_id INTEGER NOT NULL DEFAULT 0,
-  last_login_at DATETIME
-);
-```
-
-### battle_records
-
-```sql
-CREATE TABLE battle_records (
-  battle_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  room_id INTEGER NOT NULL,
-  player_a_id INTEGER NOT NULL,
-  player_b_id INTEGER NOT NULL,
-  winner_id INTEGER NOT NULL,
-  loser_id INTEGER NOT NULL,
-  rounds INTEGER NOT NULL,
-  script_version VARCHAR(64) NOT NULL,
-  created_at DATETIME NOT NULL
-);
-```
-
-### battle_round_records
-
-```sql
-CREATE TABLE battle_round_records (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  battle_id INTEGER NOT NULL,
-  round INTEGER NOT NULL,
-  player_a_skill INTEGER NOT NULL,
-  player_b_skill INTEGER NOT NULL,
-  player_a_hp INTEGER NOT NULL,
-  player_b_hp INTEGER NOT NULL,
-  detail_json TEXT NOT NULL
-);
-```
-
-### skill_versions
-
-```sql
-CREATE TABLE skill_versions (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  version_hash VARCHAR(64) NOT NULL,
-  description TEXT,
-  created_at DATETIME NOT NULL
-);
-```
-
-### login_logs
-
-```sql
-CREATE TABLE login_logs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  player_id INTEGER,
-  username VARCHAR(64) NOT NULL,
-  ip VARCHAR(64),
-  success INTEGER NOT NULL,
-  reason VARCHAR(128),
-  created_at DATETIME NOT NULL
-);
-```
-
-## 9. Lua 脚本设计
-
-### 9.1 技能脚本规范
-
-每个技能一个 Lua 文件：
-
-```text
-lua/skills/skill_1001.lua
-lua/skills/skill_1002.lua
-lua/skills/skill_1003.lua
-lua/skills/skill_1004.lua
-```
-
-统一接口：
-
-```lua
-function cast(caster, target, context)
-  return {
-    damage = 0,
-    heal = 0,
-    energy_delta = 0,
-    shield = 0,
-    text = ""
-  }
-end
-```
-
-### 9.2 普通攻击
-
-```lua
-function cast(caster, target, context)
-  local damage = math.max(1, caster.atk - math.floor(target.def * 0.5))
-
-  return {
-    damage = damage,
-    heal = 0,
-    energy_delta = 1,
-    shield = 0,
-    text = "Normal Attack"
-  }
-end
-```
-
-### 9.3 重击
-
-```lua
-function cast(caster, target, context)
-  if caster.energy < 2 then
-    return {
-      damage = 0,
-      heal = 0,
-      energy_delta = 0,
-      shield = 0,
-      text = "Not enough energy"
-    }
-  end
-
-  local damage = math.max(1, caster.atk * 2 - target.def)
-
-  return {
-    damage = damage,
-    heal = 0,
-    energy_delta = -2,
-    shield = 0,
-    text = "Heavy Strike"
-  }
-end
-```
-
-### 9.4 防御姿态
-
-```lua
-function cast(caster, target, context)
-  return {
-    damage = 0,
-    heal = 0,
-    energy_delta = -1,
-    shield = 10,
-    text = "Guard"
-  }
-end
-```
-
-### 9.5 能量聚焦
-
-```lua
-function cast(caster, target, context)
-  return {
-    damage = 0,
-    heal = 0,
-    energy_delta = 3,
-    shield = 0,
-    text = "Focus"
-  }
-end
-```
-
-## 10. Git 分支策略
-
-### 分支模型
-
-```text
-main
-develop
-feature/server-net
-feature/server-login
-feature/server-battle
-feature/client-login
-feature/client-battle
-release/demo-v1
-```
-
-### 规则
-
-| 分支 | 作用 |
-|---|---|
-| main | 稳定可演示版本 |
-| develop | 日常集成 |
-| feature/* | 功能开发 |
-| release/* | 阶段版本 |
-| hotfix/* | 紧急修复 |
-
-### 提交规范
-
-```text
-feat: add battle room state machine
-fix: handle client disconnect in match queue
-test: add lua skill unit tests
-docs: update protocol document
-build: add protobuf generation script
-```
-
-Lua 脚本每次修改必须提交，例如：
-
-```text
-feat(lua): adjust heavy strike damage
-```
-
-战斗记录保存当前 commit hash。
-
-## 11. Bash 自动化脚本规划
-
-### scripts/build.sh
-
-职责：
-
-```text
-创建 build 目录
-运行 cmake -G Ninja
-运行 ninja
-```
-
-### scripts/gen_proto.sh
-
-职责：
-
-```text
-根据 proto 文件生成 C++ 代码
-可选生成 Godot 可用协议文件
-```
-
-### scripts/run_server.sh
-
-职责：
-
-```text
-启动服务端
-加载 config/server.yaml
-输出日志路径
-```
-
-### scripts/run_tests.sh
-
-职责：
-
-```text
-编译并运行 GoogleTest
-输出测试结果
-```
-
-### scripts/init_db.sh
-
-职责：
-
-```text
-创建 SQLite 数据库
-执行 db.sql
-插入测试账号
-```
-
-### scripts/start_redis.sh
-
-职责：
-
-```text
-本地启动 Redis
-或检测 Redis 是否可连接
-```
-
-### scripts/dev_all.sh
-
-职责：
-
-```text
-生成协议
-构建服务端
-初始化数据库
-启动 Redis
-启动服务器
-```
-
-## 12. 30-45 天开发计划
-
-建议做 6 个阶段。
-
-| 阶段 | 时间 | 目标 |
-|---|---:|---|
-| 阶段 1 | Day 1-5 | 工程骨架、网络、协议 |
-| 阶段 2 | Day 6-10 | 登录、大厅、数据库、Redis |
-| 阶段 3 | Day 11-16 | 匹配、房间、客户端流程 |
-| 阶段 4 | Day 17-25 | 战斗系统、Lua 技能、回合制 |
-| 阶段 5 | Day 26-33 | 排行榜、记录、断线、测试 |
-| 阶段 6 | Day 34-45 | 打磨、Demo、文档、简历、面试准备 |
-
-## 13. 每天 5 小时以上任务拆解
-
-下面按 45 天规划。若压缩到 30 天，可以把后 15 天的打磨、测试、文档合并到每天晚上。
-
-### Day 1：项目初始化
-
-任务：
-
-- 创建 Git 仓库
-- 建立 server/client/docs 目录
-- 配置 CMake + Ninja
-- 引入 spdlog
-- 写 main.cpp 启动日志
-- Godot 创建空项目
-
-学习目标：
-
-- CMake 基础结构
-- C++20 编译配置
-- Godot 项目结构
 
 验收标准：
 
-- `build.sh` 可以编译 server
-- server 启动打印日志
-- Godot 项目可运行空场景
+- 匹配成功生成 room_id
+- 两个玩家属于同一个 room
+- 可以通过 player_id 查询 room_id
 
-### Day 2：网络层 EventLoop
+### Day 22：房间状态机
 
 任务：
 
-- 实现 EpollPoller
-- 实现 EventLoop
-- 支持 fd 注册、删除、事件分发
-- 写简单 echo server
-- Godot 创建 LoginScene UI 雏形
-
-学习目标：
-
-- epoll LT/ET 差异
-- Reactor 模型
+- 定义 RoomState
+- 支持 WaitingReady
+- 支持 Fighting
+- 支持 Finished
+- 支持 Destroyed
+- 增加状态流转校验
+- 非法状态流转返回错误
 
 验收标准：
 
-- telnet/nc 能连接 server
-- 服务端能回显消息
-- 客户端有登录界面
+- 房间状态不能乱跳
+- 玩家断线时房间状态可被标记
+- RoomManagerTest 覆盖状态流转
 
-### Day 3：TcpServer 与 TcpConnection
+### Day 23：Battle proto 与 BattleState
 
 任务：
 
-- 封装 TcpServer
-- 封装 TcpConnection
-- 实现 Buffer
-- 处理断开连接
-- NetworkClient.gd 支持连接服务器
-
-学习目标：
-
-- 非阻塞 socket
-- 输入输出缓冲区设计
+- 新增 battle proto
+- 定义 BattleStartNotify
+- 定义 BattlePlayerState
+- 定义 SelectSkillRequest/Response
+- 实现 `BattleState`
+- 初始化双方 HP、ATK、DEF、Energy
+- 房间进入 Fighting 后创建 BattleState
 
 验收标准：
 
-- 多客户端可连接
-- 断开连接不崩溃
-- Godot 能连接服务端
+- 两个玩家匹配后能收到 BattleStartNotify
+- BattleState 中双方初始状态正确
+- 单元测试覆盖初始化
 
-### Day 4：协议包头与拆包
+### Day 24：技能选择收集
 
 任务：
 
-- 实现 PacketCodec
-- 支持 length + msg_id + seq_id
-- 解决粘包半包
-- 写 GoogleTest
-- Godot 可以发送测试包
-
-学习目标：
-
-- TCP 流式协议
-- 二进制协议设计
+- 实现 SelectSkill handler
+- BattleState 记录玩家本回合选择
+- 双方都选择后进入结算准备
+- 重复选择返回错误
+- 非房间玩家请求返回错误
+- 未登录请求返回错误
 
 验收标准：
 
-- 单元测试通过
-- 服务端能解析客户端测试消息
+- 玩家只能选择一次
+- 双方选择后触发回合结算入口
+- Python 脚本能模拟两人选择技能
 
-### Day 5：Protobuf 接入
-
-任务：
-
-- 编写 common/login proto
-- gen_proto.sh
-- C++ 接入 protobuf
-- MessageDispatcher 初版
-- 客户端建立 JSON 或 Protobuf 协议适配层
-
-学习目标：
-
-- Protobuf 编译与序列化
-- 协议 ID 分发
-
-验收标准：
-
-- LoginReq/LoginResp 可以序列化
-- 服务端收到登录请求并返回假数据
-
-### Day 6：数据库初始化
+### Day 25：回合结算基础
 
 任务：
 
-- SQLite/MySQL 表结构
-- DbManager
-- PlayerDao
-- init_db.sh
-- LoginScene 接入真实登录按钮
-
-学习目标：
-
-- DAO 分层
-- 账号表设计
-
-验收标准：
-
-- 可以创建账号表
-- 可以查询玩家
-- 登录按钮能收到服务端响应
-
-### Day 7：注册系统
-
-任务：
-
-- RegisterReq/RegisterResp
-- 密码 hash
-- 注册写数据库
-- 登录日志表
-- LoginScene 加注册按钮
-
-学习目标：
-
-- 账号安全基础
-- 错误码设计
-
-验收标准：
-
-- 新账号可注册
-- 重复账号返回错误
-- 客户端显示错误提示
-
-### Day 8：登录系统
-
-任务：
-
-- LoginService
-- token 生成
-- Session 绑定 player_id
-- Redis token/session
-- 登录成功进入 LobbyScene
-
-学习目标：
-
-- Session 管理
-- Redis 基础操作
-
-验收标准：
-
-- 正确账号可以登录
-- 错误账号不能登录
-- Redis 能看到 token
-
-### Day 9：大厅系统
-
-任务：
-
-- EnterLobbyReq/Resp
-- 玩家基础信息
-- LobbyService
-- 在线状态 Redis
-- LobbyScene 显示昵称、积分、胜场
-
-学习目标：
-
-- 游戏大厅状态管理
-
-验收标准：
-
-- 登录后进入大厅
-- 大厅显示真实玩家信息
-
-### Day 10：心跳与断线
-
-任务：
-
-- HeartbeatReq/Resp
-- Session 超时检测
-- 断线清理在线状态
-- NetworkClient 心跳
-- 断线提示
-
-学习目标：
-
-- 连接保活
-- 异常断线处理
-
-验收标准：
-
-- 客户端定期心跳
-- 断线后 Redis online 被清理
-
-### Day 11：匹配系统初版
-
-任务：
-
-- StartMatchReq/Resp
-- MatchService 内存队列
-- 两人匹配成功
-- MatchScene
-- 点击匹配进入匹配界面
-
-学习目标：
-
-- 匹配队列设计
-- 玩家状态机
-
-验收标准：
-
-- 两个客户端点击匹配后匹配成功
-- 客户端收到 MatchSuccessNotify
-
-### Day 12：Redis 匹配队列
-
-任务：
-
-- match:queue
-- match:player:{id}
-- 取消匹配
-- 重复匹配保护
-- 取消匹配按钮
-
-学习目标：
-
-- Redis list/set 使用
-- 分布式匹配基础
-
-验收标准：
-
-- 玩家进入 Redis 匹配队列
-- 取消匹配生效
-- 重复点击不会重复入队
-
-### Day 13：房间系统
-
-任务：
-
-- RoomManager
-- Room 创建与销毁
-- EnterRoomNotify
-- 房间状态机
-- 匹配成功后切到 BattleScene
-
-学习目标：
-
-- 房间制游戏架构
-
-验收标准：
-
-- 匹配成功创建 room_id
-- 双方进入同一个房间
-
-### Day 14：战斗房间初始化
-
-任务：
-
-- BattleRoom
-- BattlePlayerState
-- BattleStartNotify
-- 初始化 HP/ATK/DEF/Energy
-- BattleScene 显示双方状态
-
-学习目标：
-
-- 战斗状态建模
-
-验收标准：
-
-- 进入战斗后双方 HP/能量显示正确
-
-### Day 15：技能选择协议
-
-任务：
-
-- SelectSkillReq/Resp
-- 记录玩家选择
-- 双方都选择后进入结算
-- BattleScene 增加 4 个技能按钮
-
-学习目标：
-
-- 输入收集与状态同步
-
-验收标准：
-
-- 玩家点击技能后按钮锁定
-- 服务端收到双方技能选择
-
-### Day 16：回合定时器
-
-任务：
-
-- TimerManager
-- 回合 15 秒超时
-- 超时默认普通攻击
-- 客户端显示倒计时
-
-学习目标：
-
-- 游戏定时器设计
-
-验收标准：
-
-- 不选择技能时自动普通攻击
-- 客户端倒计时正常
-
-### Day 17：Lua 接入
-
-任务：
-
-- 引入 Lua 5.4 / sol2
-- ScriptEngine
-- 加载 skill_1001.lua
-- C++ 调 Lua
-- 战斗日志显示技能名
-
-学习目标：
-
-- C++ 与 Lua 交互
-
-验收标准：
-
-- 普通攻击由 Lua 返回伤害
-- Lua 错误不会导致服务端崩溃
-
-### Day 18：完成 4 个技能
-
-任务：
-
-- skill_1001 普通攻击
-- skill_1002 重击
-- skill_1003 防御
-- skill_1004 聚能
-- 技能能量校验
-- 技能按钮显示消耗
-
-学习目标：
-
-- 脚本化战斗逻辑
-
-验收标准：
-
-- 4 个技能都可用
-- 能量不足不能释放高消耗技能
-
-### Day 19：回合结算
-
-任务：
-
-- RoundResultNotify
-- 伤害、护盾、能量更新
+- 实现普通攻击
+- 实现基础伤害公式
+- 更新 HP
+- 更新 Energy
+- 生成 RoundResultNotify
+- 判断 HP 是否归零
 - 回合数递增
-- HP 条变化
-- 能量条变化
-- 战斗日志追加
 
-学习目标：
+基础公式：
 
-- 服务端权威同步
-
-验收标准：
-
-- 双方客户端看到一致结果
-
-### Day 20：胜负判断
-
-任务：
-
-- HP <= 0 判断胜负
-- BattleEndNotify
-- 房间状态 Finished
-- 结算弹窗
-- 返回大厅按钮
-
-学习目标：
-
-- 战斗生命周期
+```text
+damage = max(1, attacker.atk - defender.def)
+```
 
 验收标准：
 
-- 一方 HP 归零后战斗结束
-- 双方看到胜负结果
+- 一回合后双方状态变化正确
+- 双方连接收到相同 RoundResultNotify
+- 单元测试覆盖伤害计算
 
-### Day 21：战斗记录入库
+### Day 26：Timer 驱动回合超时
 
 任务：
 
-- battle_records
-- battle_round_records
-- 保存每回合结果
-- 保存 script_version
-- 结算界面显示回合数
-
-学习目标：
-
-- 战斗回放数据结构
+- 每回合开始注册超时定时器
+- 超时时未选择玩家默认普通攻击
+- 已选择玩家不受影响
+- 回合结束后取消或忽略旧 timer
+- 增加超时测试
 
 验收标准：
 
-- 战斗结束后 DB 有记录
+- 玩家不发送技能也能推进回合
+- 超时后使用默认技能
+- 不会重复结算同一回合
 
-### Day 22：排行榜 Redis
+### Day 27：Lua 脚本接入
 
 任务：
 
-- 胜负后更新 rank:score
-- RankListReq/Resp
-- 查询前 20
-- RankScene 初版
+- 引入 Lua 5.4
+- 引入 sol2 或等价绑定方式
+- 实现 `ScriptEngine`
+- 加载 `lua/skills/skill_1001.lua`
+- C++ 调用 Lua 计算普通攻击
+- 捕获 Lua 异常
 
-学习目标：
+建议目录：
 
-- Redis zset 排行榜
+```text
+server/include/script/ScriptEngine.h
+server/src/script/ScriptEngine.cpp
+server/lua/skills/skill_1001.lua
+```
+
+验收标准：
+
+- 普通攻击伤害由 Lua 返回
+- Lua 报错不会导致服务端崩溃
+- Lua 错误有日志
+
+### Day 28：四个技能脚本
+
+任务：
+
+- 实现普通攻击
+- 实现重击
+- 实现防御姿态
+- 实现能量聚焦
+- C++ 校验能量是否足够
+- Lua 返回技能结果结构
+- 单元测试覆盖四个技能
+
+技能建议：
+
+```text
+1001 普通攻击：0 能量
+1002 重击：2 能量
+1003 防御姿态：1 能量
+1004 能量聚焦：0 能量，恢复能量
+```
+
+验收标准：
+
+- 四个技能都能通过脚本执行
+- 能量不足时拒绝释放高消耗技能
+- 战斗回合结果包含技能文本
+
+### Day 29：战斗结束与结算
+
+任务：
+
+- 判断胜负
+- 发送 BattleEndNotify
+- 房间状态置为 Finished
+- Session 回到大厅/空闲状态
+- 更新玩家临时战斗统计
+- 增加完整战斗集成测试
+
+验收标准：
+
+- HP 归零后战斗停止
+- 双方收到相同胜负结果
+- Finished 房间不再接受技能请求
+
+### Day 30：战斗记录入库
+
+任务：
+
+- 设计 battle_records 表
+- 设计 battle_round_records 表
+- 保存胜者、败者、回合数
+- 保存每回合技能与伤害
+- 保存脚本版本字段
+- 增加 DAO 和测试
+
+验收标准：
+
+- 战斗结束后数据库有记录
+- 每回合结果可以查询
+- 记录中包含 battle_id 和 round_index
+
+### Day 31：排行榜 Redis
+
+任务：
+
+- 使用 Redis zset 保存积分
+- 战斗结束后更新积分
+- 定义 RankListRequest/Response
+- 查询排行榜前 N 名
+- Python 脚本测试排行榜
+
+Key 建议：
+
+```text
+rank:score
+```
 
 验收标准：
 
 - 胜者加分
-- 排行榜可显示
+- 败者扣分或保持
+- RankListResponse 返回有序列表
 
-### Day 23：大厅接入排行榜入口
-
-任务：
-
-- 大厅请求玩家最新积分
-- 排行榜返回自己的名次
-- LobbyScene -> RankScene -> LobbyScene
-
-学习目标：
-
-- UI 页面流转
-
-验收标准：
-
-- 玩家可从大厅查看排行榜并返回
-
-### Day 24：战斗表现打磨
+### Day 32：断线处理
 
 任务：
 
-- 战斗结果增加 text
-- 技能结果结构完善
-- 日志更清晰
-- 伤害数字
-- 技能提示
-- 简单闪烁/颜色反馈
-
-学习目标：
-
-- 客户端表现层与数据层分离
-
-验收标准：
-
-- 战斗看起来像游戏，不像接口测试
-
-### Day 25：断线处理
-
-任务：
-
-- 战斗中断线
-- 大厅断线
-- 匹配中断线
+- 匹配中断线处理
+- 房间中断线处理
+- 战斗中断线处理
 - Session 清理
-- 断线弹窗
-- 返回登录
-
-学习目标：
-
-- 异常状态处理
+- Redis 在线状态清理
+- 房间延迟销毁或判负策略
 
 验收标准：
 
-- 玩家断线不会卡死房间
-- 匹配队列不会残留脏数据
+- 匹配中断线不会残留队列
+- 战斗中断线不会卡死房间
+- 日志能说明断线处理结果
 
-### Day 26：防重复登录
+### Day 33：配置系统
 
 任务：
 
-- login_lock
-- 同账号重复登录踢旧连接或拒绝新连接
-- session:{player_id}
-- 重复登录提示
+- 新增 server config
+- 配置监听端口
+- 配置 DB 路径
+- 配置 Redis 地址
+- 配置日志等级
+- 实现 ConfigManager
 
-学习目标：
-
-- 登录互斥设计
-
-验收标准：
-
-- 同账号不能产生两个有效在线状态
-
-### Day 27：配置系统
-
-任务：
-
-- server.yaml
-- 端口、DB、Redis、日志路径配置
-- ConfigManager
-- 客户端服务器地址配置
-
-学习目标：
-
-- 配置化服务
-
-验收标准：
-
-- 修改配置即可切换端口/数据库路径
-
-### Day 28：Admin 命令
-
-任务：
-
-- reload_lua
-- online_count
-- room_count
-- 简单 admin 控制台
-- 客户端 UI 修正
-
-学习目标：
-
-- 运营管理接口
-
-验收标准：
-
-- 不重启服务端可 reload Lua
-
-### Day 29：Lua 版本管理
-
-任务：
-
-- ScriptVersionManager
-- 获取 git commit hash
-- 写入 skill_versions
-- 战斗记录绑定版本
-
-学习目标：
-
-- 热更新与版本追踪思想
-
-验收标准：
-
-- 每场战斗记录有 script_version
-
-### Day 30：第一版完整 Demo
-
-任务：
-
-- 从注册到排行榜全流程联调
-- 修复阻塞 bug
-- 打 tag：demo-v0.1
-- 全流程可跑
-
-学习目标：
-
-- 集成测试
-
-验收标准：
-
-- 两个客户端可以完整打一局
-- 排行榜更新
-- 数据库有记录
-
-### Day 31-35：测试与稳定性
-
-任务：
-
-- GoogleTest 覆盖 PacketCodec
-- BattleService 测试
-- MatchService 测试
-- Lua 技能测试
-- 异常输入测试
-- 修 UI 状态错乱
-- 防止重复点击
-- 网络错误提示
-
-验收标准：
-
-- 核心测试通过
-- 异常操作不会崩溃
-
-### Day 36-40：体验打磨
-
-任务：
-
-- 日志分类
-- 错误码统一
-- 脚本补注释
-- 战斗数值微调
-- README 完善
-- 架构图完善
-- BattleScene 美化
-- RankScene 美化
-- 加简单音效/动画可选
-
-验收标准：
-
-- 项目可以给别人拉下来跑
-- Demo 观感完整
-
-### Day 41-45：展示与面试准备
-
-任务：
-
-- 录制演示视频
-- 写项目文档
-- 整理技术难点
-- 准备简历描述
-- 准备面试问答
-- 打 tag：demo-v1.0
-
-验收标准：
-
-- 5 分钟内可以讲清项目
-- 10 分钟内可以演示完整流程
-- GitHub 仓库整洁
-- README 有启动步骤
-
-## 14. 每天学习目标总结
-
-每天至少覆盖三类能力：
+建议文件：
 
 ```text
-1. 服务端工程能力
-2. 客户端交互能力
-3. 游戏业务闭环能力
+server/config/server.yaml
 ```
 
-重点学习路线：
+验收标准：
 
-| 阶段 | 学习重点 |
-|---|---|
-| Day 1-5 | CMake、epoll、Reactor、协议拆包 |
-| Day 6-10 | 登录、Session、Redis、DB |
-| Day 11-16 | 匹配、房间、状态机、定时器 |
-| Day 17-25 | Lua、战斗结算、服务端权威 |
-| Day 26-35 | 稳定性、断线、测试、配置 |
-| Day 36-45 | 项目展示、简历、面试表达 |
+- 修改配置即可切换端口
+- 测试环境可以使用独立 DB
+- 配置加载失败有明确日志
 
-## 15. 每天验收标准原则
+### Day 34：日志整理
 
-每天必须满足：
+任务：
+
+- 区分 server/login/match/battle/db/cache 日志
+- 统一日志格式
+- 对关键业务增加日志
+- 对异常输入增加 warning
+- 对系统错误增加 error
+
+验收标准：
+
+- 登录、匹配、战斗主流程日志清晰
+- 排查一个请求可以通过 seq_id 串起来
+- 日志不输出密码等敏感字段
+
+### Day 35：协议文档
+
+任务：
+
+- 新增 `docs/protocol.md`
+- 说明包头格式
+- 说明 msg_id 规划
+- 说明 seq_id 用途
+- 说明错误码
+- 说明当前 proto 文件
+
+验收标准：
+
+- 只看文档就能写一个测试客户端
+- Python 脚本实现和文档一致
+
+### Day 36：架构文档
+
+任务：
+
+- 新增 `docs/architecture.md`
+- 画出网络层、协议层、业务层、存储层关系
+- 说明 TcpConnection 生命周期
+- 说明 MessageDispatcher 扩展方式
+- 说明 Session 和 Room 的关系
+
+验收标准：
+
+- 面试时能按文档讲清整体架构
+- 每个模块职责清晰
+
+### Day 37：集成测试整理
+
+任务：
+
+- 重构 Python 测试脚本
+- 支持指定 case
+- 支持并发连接数
+- 支持请求数
+- 输出通过率和耗时
+- 增加登录、匹配、战斗基础流程测试
+
+验收标准：
+
+- 一条命令可以跑核心集成测试
+- 失败时能看到具体 case 和原因
+
+### Day 38：基础压测
+
+任务：
+
+- Python 脚本增加 benchmark 模式
+- 模拟 N 个连接
+- 每个连接发送 M 个请求
+- 统计总耗时、平均延迟、失败数
+- 记录测试环境
+
+验收标准：
+
+- 可以得到基础吞吐数据
+- 服务端不会因为普通压测崩溃
+- README 只记录测试方法，不夸大性能结果
+
+### Day 39：边界与异常测试
+
+任务：
+
+- 超大包测试
+- 非法 length 测试
+- 非法 Protobuf payload 测试
+- 未知 msg_id 测试
+- 重复登录测试
+- 重复匹配测试
+- 战斗非法技能测试
+
+验收标准：
+
+- 异常输入不会导致崩溃
+- 连接关闭或错误响应符合预期
+- 核心异常都有测试覆盖
+
+### Day 40：代码整理
+
+任务：
+
+- 清理 include 顺序
+- 清理命名不一致
+- 清理无用函数
+- 保持模块边界
+- 避免业务代码堆在 TcpServer
+- 整理 CMake target
+
+验收标准：
+
+- build 无业务代码警告
+- 目录结构清晰
+- 新增模块能快速找到位置
+
+### Day 41：CI 完善
+
+任务：
+
+- CI 增加 proto 同步检查
+- CI 增加格式检查可选
+- CI 缓存依赖可选
+- README 增加 CI 状态说明
+
+验收标准：
+
+- PR 或 push 自动跑完整构建测试
+- proto 改动未生成代码时 CI 能发现
+
+### Day 42：README 完善
+
+任务：
+
+- 更新当前能力
+- 更新构建步骤
+- 更新测试步骤
+- 更新模块说明
+- 更新后续计划
+- 保持描述准确、专业、不过度包装
+
+验收标准：
+
+- 新读者 5 分钟能理解项目
+- 新环境按 README 可以构建测试
+
+### Day 43：面试问答整理
+
+任务：
+
+- 整理网络层问题
+- 整理协议层问题
+- 整理 Session 问题
+- 整理匹配/房间问题
+- 整理战斗系统问题
+- 整理 Redis/DB 问题
+
+建议输出：
 
 ```text
-服务端有新增能力
-客户端有可见变化
-至少一个可运行检查
-代码提交一次
+docs/interview_notes.md
 ```
 
-每日提交格式：
+验收标准：
+
+- 每个问题都能结合项目代码回答
+- 不背概念，能说出自己实现中的取舍
+
+### Day 44：项目复盘
+
+任务：
+
+- 整理项目从 Day 1 到当前的演进
+- 记录踩坑：epoll、生命周期、Protobuf、CMake、Redis、Lua
+- 记录性能和稳定性改进点
+- 记录后续可扩展方向
+
+建议输出：
 
 ```text
-Day 12:
-- server: add redis match queue
-- client: add cancel match button
-- test: verify duplicated match request
+docs/project_review.md
 ```
 
-不允许连续多天只写服务端。客户端可以简陋，但每天都要更接近真实游戏流程。
+验收标准：
 
-## 16. 最终可展示 Demo 标准
+- 能讲清为什么这样设计
+- 能讲清还有哪些不足和下一步计划
 
-### 必须演示
+### Day 45：阶段版本整理
 
-```text
-1. 启动 Redis
-2. 初始化数据库
-3. 启动 C++ 服务端
-4. 启动两个 Godot 客户端
-5. 注册/登录两个账号
-6. 进入大厅
-7. 双方点击匹配
-8. 匹配成功进入战斗
-9. 双方选择技能
-10. 多回合战斗
-11. 一方胜利
-12. 写入数据库
-13. 更新 Redis 排行榜
-14. 客户端查看排行榜
-```
+任务：
 
-### 演示时可以展示的命令
+- 跑完整 build
+- 跑完整 ctest
+- 跑完整 Python 集成测试
+- 更新 README 和 docs
+- 打 tag
+- 准备简历项目描述
+
+建议 tag：
 
 ```bash
-./scripts/build.sh
-./scripts/init_db.sh
-./scripts/start_redis.sh
-./scripts/run_server.sh
-./scripts/run_tests.sh
+git tag server-v0.1
 ```
 
-### Demo 合格标准
+验收标准：
 
-- 不是纯控制台
-- 不是纯接口测试
-- 有 Godot 客户端
-- 有完整 UI 流程
-- 有真实网络通信
-- 有服务端权威战斗
-- 有 Lua 技能
-- 有 Redis 排行榜
-- 有数据库战斗记录
-- 有测试和文档
+- 仓库结构整洁
+- 文档和代码状态一致
+- 一条命令能构建
+- 测试全部通过
+- 项目描述准确、专业、可解释
 
-## 17. 简历写法
+## 9. 项目表达
 
-### 项目名称
+这个项目适合表达为一个持续演进的 C++ 游戏服务端训练项目，重点突出：
 
-Nebula Duel：C++20 全栈 2D 回合制对战游戏服务器
+- 从零实现 C++20 游戏服务端基础网络框架
+- 使用 epoll/Reactor 管理 TCP 连接
+- 设计自定义二进制包头并处理粘包半包
+- 接入 Protobuf 并实现消息分发
+- 使用 GoogleTest 和 Python 脚本验证协议链路
 
-### 简历描述
+后续会继续围绕 Session、数据库、Redis、匹配、房间、战斗和 Lua 脚本扩展服务端业务闭环。
 
-使用 C++20 从零实现一套 2D 房间制回合对战游戏服务器，基于 Linux epoll/Reactor 网络模型处理客户端连接，采用 Protobuf 自定义二进制协议完成登录、匹配、房间、战斗、排行榜等核心流程。服务端使用 Lua 5.4 + sol2 实现技能脚本化，保证战斗由服务端权威判定；使用 Redis 管理 Token、在线状态、匹配队列与排行榜，使用 SQLite/MySQL 持久化玩家数据、战斗记录和登录日志。客户端使用 Godot 4 实现登录、大厅、匹配、战斗和排行榜界面，完成可实际游玩的 1v1 回合制 Demo。
+## 10. 面试准备方向
 
-### 技术亮点
+重点准备：
 
-```text
-- 基于 epoll + Reactor 实现非阻塞 TCP 网络层，支持粘包半包处理和消息分发
-- 设计 Protobuf 协议体系，覆盖登录、匹配、房间、战斗、排行榜完整链路
-- 实现服务端权威战斗系统，客户端只负责输入和展示，避免客户端作弊
-- 接入 Lua 5.4/sol2 实现技能逻辑脚本化，并通过 Git commit hash 记录脚本版本
-- 使用 Redis 实现 Token 缓存、在线状态、匹配队列、防重复登录与排行榜
-- 使用 SQLite/MySQL 持久化玩家账号、战斗记录、技能版本和登录日志
-- 使用 GoogleTest 对协议编解码、匹配逻辑、战斗结算和 Lua 技能进行测试
-- 使用 Bash 脚本完成协议生成、构建、测试、数据库初始化和服务启动自动化
-```
-
-### 面向游戏服务端岗位的强表达
-
-项目重点不是单点功能，而是完整复现了游戏服务器的核心业务链路：连接管理、会话状态、匹配、房间、战斗状态机、脚本化技能、缓存、持久化、排行榜、断线处理和客户端同步。
-
-## 18. 面试问题清单
-
-### 网络层
-
-1. 为什么游戏服务器常用 Reactor 模型？
-2. epoll 的 LT 和 ET 有什么区别？
-3. 如何处理 TCP 粘包和半包？
-4. 为什么 socket 要设置非阻塞？
-5. PacketCodec 如何保证包完整性？
-6. 如果客户端发恶意超大包怎么办？
-7. 单线程 Reactor 和多线程 Reactor 有什么区别？
-8. 如何处理客户端突然断线？
-9. 如何设计心跳？
-10. 如何避免 send buffer 堆积？
-
-### 协议层
-
-1. 为什么使用 Protobuf？
-2. 协议号如何规划？
-3. seq_id 有什么用？
-4. 如何兼容旧版本客户端？
-5. Protobuf 字段删除有什么风险？
-6. 如何处理未知 msg_id？
-7. 错误码如何设计？
-8. 二进制协议和 JSON 协议有什么区别？
-
-### 登录与 Session
-
-1. 登录 token 如何生成？
-2. token 放 Redis 的好处是什么？
-3. 如何防止重复登录？
-4. Session 和 Connection 的区别是什么？
-5. 玩家断线后是否立即下线？
-6. 登录日志有什么用？
-7. 密码为什么不能明文存储？
-
-### 匹配与房间
-
-1. 匹配队列用内存还是 Redis？
-2. Redis 匹配队列有什么一致性问题？
-3. 如何避免一个玩家重复进入多个房间？
-4. 房间状态机如何设计？
-5. 房间什么时候销毁？
-6. 匹配成功后有玩家断线怎么办？
-7. 如何扩展到按段位匹配？
-
-### 战斗系统
-
-1. 为什么战斗必须由服务端权威判定？
-2. 客户端能否预测伤害？
-3. 回合制战斗状态如何设计？
-4. 双方同时选择技能如何结算？
-5. 玩家超时不操作怎么办？
-6. 如何保证双方客户端看到一致结果？
-7. 如何记录战斗回放？
-8. 战斗中 Lua 报错怎么办？
-9. 如何防止客户端发送非法技能？
-10. 如何扩展更多技能？
-
-### Lua 脚本
-
-1. 为什么技能逻辑适合脚本化？
-2. sol2 的作用是什么？
-3. C++ 如何向 Lua 暴露对象？
-4. Lua 脚本热更新有哪些风险？
-5. 如何记录脚本版本？
-6. 如果热更新后旧战斗还在进行怎么办？
-7. Lua 执行错误如何隔离？
-8. 如何限制 Lua 脚本权限？
-
-### Redis
-
-1. Redis 在项目中承担了哪些职责？
-2. 为什么排行榜适合用 zset？
-3. Redis token 过期如何处理？
-4. Redis 宕机怎么办？
-5. Redis 和数据库的数据如何同步？
-6. 玩家热数据为什么放 Redis？
-7. 防重复登录锁如何设计？
-
-### 数据库
-
-1. 玩家表如何设计？
-2. 战斗记录为什么要分 battle_records 和 round_records？
-3. 为什么登录日志单独建表？
-4. 数据库写失败怎么办？
-5. 战斗结束时先写 DB 还是先回客户端？
-6. SQLite 和 MySQL 的区别？
-7. 如何做索引？
-
-### 客户端
-
-1. Godot 客户端如何组织场景？
-2. 客户端为什么不计算最终战斗结果？
-3. 网络消息如何分发到 UI？
-4. 战斗界面如何避免重复点击？
-5. 断线后客户端如何处理？
-6. 如何表现回合结果？
-7. 客户端收到服务器状态和本地显示不一致怎么办？
-
-### 工程化
-
-1. CMake 项目如何组织？
-2. 为什么使用 Ninja？
-3. Bash 脚本解决了什么问题？
-4. GoogleTest 测试了哪些核心逻辑？
-5. spdlog 如何分类日志？
-6. Git 分支如何管理？
-7. 如何让别人快速运行项目？
-8. 这个项目还能如何扩展？
-
-## 推荐最小可行版本
-
-为了 30-45 天稳妥完成，建议第一版坚持这个范围：
-
-```text
-账号：注册 + 登录
-大厅：显示玩家信息
-匹配：两人匹配
-房间：自动进入
-战斗：4 个技能，回合制
-结算：胜负 + 加减分
-排行：Redis 前 20
-数据库：玩家 + 战斗记录 + 登录日志
-客户端：5 个界面完整流转
-```
-
-不要一开始就做：
-
-```text
-复杂动画
-复杂技能树
-好友系统
-聊天系统
-多房间观战
-断线重连完整恢复
-分布式网关
-复杂 ECS 战斗框架
-```
-
-这些可以放到 v2。
-
-## 最终项目一句话
-
-Nebula Duel 是一个使用 C++20 + epoll/Reactor + Protobuf + Lua + Redis + SQLite/MySQL + Godot 4 实现的完整 1v1 回合制对战游戏项目，覆盖登录、大厅、匹配、房间、战斗、结算、排行榜和工程化自动化流程。
-
-这个项目做完后，不只是“我会 C++ 网络编程”，而是能表达成：
-
-> 我完整实现过一个可玩的游戏服务器业务闭环，并且理解客户端、服务端、缓存、数据库、脚本、协议和工程化之间如何协作。
+- 为什么 TCP 需要拆包
+- length 字段为什么不包含自身
+- seq_id 的用途
+- Protobuf 和 JSON 的取舍
+- Reactor 模型的职责划分
+- Buffer 如何避免频繁移动内存
+- 非阻塞 socket 如何处理 EAGAIN
+- 连接断开时如何管理生命周期
+- MessageDispatcher 如何扩展
+- 单元测试和集成测试分别覆盖什么

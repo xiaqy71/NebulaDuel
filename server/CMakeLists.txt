@@ -11,6 +11,15 @@ find_package(GTest REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(absl REQUIRED)
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    set_source_files_properties(
+        generated/common.pb.cc
+        generated/login.pb.cc
+        PROPERTIES
+            COMPILE_OPTIONS "-Wno-nullability-extension"
+    )
+endif()
+
 add_executable(nebula_server
     src/main.cpp
     src/net/EpollPoller.cpp
@@ -34,13 +43,19 @@ target_link_libraries(nebula_server
     PRIVATE
         spdlog::spdlog
         protobuf::libprotobuf
-        absl::log_internal_check_op
-        absl::log_internal_message
-        absl::log_internal_conditions
-        absl::strings
-        absl::base
-
 )
+
+foreach(ABSL_TARGET
+    absl::log_internal_check_op
+    absl::log_internal_message
+    absl::log_internal_conditions
+    absl::strings
+    absl::base
+)
+    if(TARGET ${ABSL_TARGET})
+        target_link_libraries(nebula_server PRIVATE ${ABSL_TARGET})
+    endif()
+endforeach()
 
 target_compile_options(nebula_server
     PRIVATE
