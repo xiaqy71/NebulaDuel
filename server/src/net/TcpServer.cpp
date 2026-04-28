@@ -1,6 +1,10 @@
 #include "net/TcpServer.h"
 
+#include "common.pb.h"
+#include "login.pb.h"
 #include "net/TcpConnection.h"
+#include "protocol/MessageId.h"
+#include "protocol/PacketCodec.h"
 
 #include <arpa/inet.h>
 #include <cstdint>
@@ -11,7 +15,31 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-TcpServer::TcpServer(EventLoop& loop, uint16_t port) : loop_(loop), port_(port) {}
+TcpServer::TcpServer(EventLoop& loop, uint16_t port) : loop_(loop), port_(port) {
+    dispatcher_.registerHandler(
+        MessageId::kLoginRequest, [](TcpConnection& conn, const Packet& packet) {
+            nebula::login::LoginRequest req;
+            if (!req.ParseFromString(packet.payload)) {
+                spdlog::get("server")->warn("parse LoginRequest failed");
+                return;
+            }
+
+            spdlog::get("server")->info("login request username = {}", req.username());
+
+            nebula::login::LoginResponse resp;
+            resp.set_error_code(nebula::common::ERROR_CODE_OK);
+            resp.set_message("login ok");
+            resp.set_player_id(1);
+
+            std::string payload;
+            if (!resp.SerializeToString(&payload)) {
+                spdlog::get("server")->warn("serialize LoginResponse failed");
+                return;
+            }
+
+            conn.send(PacketCodec::encode(MessageId::kLoginResponse, packet.seq_id, payload));
+        });
+}
 TcpServer::~TcpServer() = default;
 
 void TcpServer::start() {
@@ -24,7 +52,7 @@ void TcpServer::start() {
 }
 
 void TcpServer::handleAccept() {
-    while (1) {
+    while (true) {
         int client_fd = ::accept4(listenFd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
@@ -32,25 +60,34 @@ void TcpServer::handleAccept() {
             }
             throw std::runtime_error("accept4 failed");
         }
-        auto conn = TcpConnection::create(loop_, client_fd);
-        auto* conn_ptr = conn.get();
-        conn->setClosecallback([this](int fd) { connections_.erase(fd); });
-        loop_.add(client_fd, EPOLLIN, [conn_ptr](uint32_t revents) {
+        auto conn = TcpConnection::create(loop_, client_fd, dispatcher_);
+        connections_[client_fd] = std::move(conn);
+        loop_.add(client_fd, EPOLLIN, [this, client_fd](uint32_t revents) {
+            auto iter = connections_.find(client_fd);
+            if (iter == connections_.end()) {
+                return;
+            }
+            auto* conn = iter->second.get();
             if ((revents & EPOLLERR) || (revents & EPOLLHUP)) {
-                conn_ptr->close();
+                conn->close();
+                connections_.erase(client_fd);
                 return;
             }
             if (revents & EPOLLIN) {
-                conn_ptr->handleRead();
-                if (!conn_ptr->connected()) {
+                conn->handleRead();
+                if (!conn->connected()) {
+                    connections_.erase(client_fd);
                     return;
                 }
             }
             if (revents & EPOLLOUT) {
-                conn_ptr->handleWrite();
+                conn->handleWrite();
+                if (!conn->connected()) {
+                    connections_.erase(client_fd);
+                    return;
+                }
             }
         });
-        connections_[client_fd] = std::move(conn);
     }
 }
 

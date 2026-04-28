@@ -1,6 +1,7 @@
 #pragma once
 
 #include "net/EventLoop.h"
+#include "protocol/MessageDispatcher.h"
 
 #include <cstdint>
 #include <memory>
@@ -24,6 +25,7 @@ private:
 
 private:
     EventLoop& loop_;
+    MessageDispatcher dispatcher_;
     int listenFd_{-1};
     uint16_t port_;
     std::unordered_map<int, std::unique_ptr<TcpConnection>> connections_;

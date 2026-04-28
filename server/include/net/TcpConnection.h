@@ -2,6 +2,7 @@
 
 #include "net/Buffer.h"
 #include "net/EventLoop.h"
+#include "protocol/MessageDispatcher.h"
 
 #include <functional>
 #include <memory>
@@ -9,11 +10,10 @@
 
 class TcpConnection {
 public:
-    using CloseCallback = std::function<void(int)>;
-    void setClosecallback(CloseCallback cb);
     TcpConnection(const TcpConnection&) = delete;
     auto operator=(TcpConnection&) -> TcpConnection& = delete;
-    static auto create(EventLoop& loop, int fd) -> std::unique_ptr<TcpConnection>;
+    static auto create(EventLoop& loop, int fd, MessageDispatcher& dispatcher)
+        -> std::unique_ptr<TcpConnection>;
     ~TcpConnection();
     void handleRead();
     void handleWrite();
@@ -27,13 +27,12 @@ public:
     }
 
 private:
-    TcpConnection(EventLoop& loop, int fd);
+    TcpConnection(EventLoop& loop, int fd, MessageDispatcher& dispatcher);
 
     EventLoop& loop_;
     int fd_;
     Buffer inputBuffer_;
     Buffer outputBuffer_;
     bool connected_;
-
-    CloseCallback closeCallback_;
+    MessageDispatcher& dispatcher_;
 };

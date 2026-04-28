@@ -1,20 +1,22 @@
 #include "net/TcpConnection.h"
 
+#include "protocol/MessageDispatcher.h"
+#include "protocol/PacketCodec.h"
+
 #include <cerrno>
 #include <memory>
+#include <spdlog/spdlog.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-TcpConnection::TcpConnection(EventLoop& loop, int fd) : loop_(loop), fd_(fd), connected_(true) {}
+TcpConnection::TcpConnection(EventLoop& loop, int fd, MessageDispatcher& dispatcher)
+    : loop_(loop), fd_(fd), connected_(true), dispatcher_(dispatcher) {}
 TcpConnection::~TcpConnection() {}
 
-auto TcpConnection::create(EventLoop& loop, int fd) -> std::unique_ptr<TcpConnection> {
-    return std::unique_ptr<TcpConnection>(new TcpConnection(loop, fd));
-}
-
-void TcpConnection::setClosecallback(CloseCallback cb) {
-    closeCallback_ = std::move(cb);
+auto TcpConnection::create(EventLoop& loop, int fd, MessageDispatcher& dispatcher)
+    -> std::unique_ptr<TcpConnection> {
+    return std::unique_ptr<TcpConnection>(new TcpConnection(loop, fd, dispatcher));
 }
 
 void TcpConnection::handleRead() {
@@ -25,7 +27,26 @@ void TcpConnection::handleRead() {
     while (true) {
         ssize_t n = ::read(fd_, buf, sizeof(buf));
         if (n > 0) {
-            send(std::string_view(buf, static_cast<size_t>(n)));
+
+            inputBuffer_.append(buf, static_cast<size_t>(n));
+            while (true) {
+                Packet packet;
+
+                auto result = PacketCodec::decode(inputBuffer_, packet);
+                if (result == DecodeResult::NeedMore) {
+                    break;
+                }
+                if (result == DecodeResult::Error) {
+                    spdlog::get("server")->warn("invalid packet, closing fd={}", fd_);
+                    close();
+                    return;
+                }
+
+                spdlog::get("server")->info("packet msg_id = {}, seq_id={}, payload_size = {}",
+                                            packet.msg_id, packet.seq_id, packet.payload.size());
+
+                dispatcher_.dispatch(*this, packet);
+            }
             continue;
         }
         if (n == 0) {
@@ -72,14 +93,10 @@ void TcpConnection::close() {
         return;
     }
     connected_ = false;
-    const int old_fd = fd_;
     if (fd_ >= 0) {
         loop_.remove(fd_);
         ::close(fd_);
         fd_ = -1;
-    }
-    if (closeCallback_) {
-        closeCallback_(old_fd);
     }
 }
 

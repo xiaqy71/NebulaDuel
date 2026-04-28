@@ -36,6 +36,8 @@ core.*
 .cache/
 .codex
 .idea/
+__pycache__/
+*.pyc
 *.swp
 *.swo
 *~
